@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Echoes of Luminara — JS Prototype</title>
+  <style>
+    :root { --bg:#0b0f1a; --panel:#121826; --accent:#8ee1ff; --accent2:#b1ff8a; --danger:#ff6b6b; --muted:#9aa4b2; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;background:radial-gradient(1200px 600px at 60% -10%,#1c2540 0%,var(--bg) 45%,#05070d 100%) fixed;color:#e5e7eb;display:grid;place-items:center;min-height:100vh;padding:24px}
+    .wrap{width:min(100%,960px)}
+    header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}
+    h1{font-size:clamp(18px,4vw,24px);margin:0;letter-spacing:.5px}
+    .hud{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .tag{padding:6px 10px;border:1px solid #243047;border-radius:12px;background:#0f1524aa;backdrop-filter:blur(8px)}
+    canvas{width:100%;height:auto;image-rendering:pixelated;border-radius:16px;box-shadow:0 10px 30px #0008,inset 0 0 0 1px #203;background:linear-gradient(#0b1120,#0a0e1a) no-repeat center/cover}
+    footer{margin-top:10px;color:var(--muted);font-size:13px;line-height:1.4}
+    kbd{background:#1b2337;border:1px solid #2a3452;padding:2px 6px;border-radius:6px;box-shadow:inset 0 -1px 0 #0006}
+    .btns{display:flex;gap:8px;margin-left:auto}
+    button{background:#151e33;color:#e5e7eb;border:1px solid #223055;padding:8px 10px;border-radius:10px;cursor:pointer}
+    button:hover{border-color:#34508f;box-shadow:0 0 0 3px #34508f30}
+    .overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#0b1120cc;backdrop-filter:blur(4px);z-index:10}
+    .cards{display:grid;grid-template-columns:repeat(3, minmax(220px, 1fr));gap:16px;max-width:900px;padding:16px}
+    .card{background:#11182b;border:1px solid #2b3a60;border-radius:16px;padding:16px;box-shadow:0 8px 24px #0007}
+    .card h3{margin:6px 0 6px;font-size:18px}
+    .card p{margin:0;color:#c7d2fe;font-size:14px;min-height:44px}
+    .card .tag{display:inline-block;margin-top:10px}
+    .card button{width:100%;margin-top:12px}
+    .overlay h2{text-align:center;margin:0 0 8px 0}
+    #testOutput{margin-top:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Echoes of Luminara — <span style="color:var(--accent)">Prototype</span></h1>
+      <div class="btns">
+        <button id="btnPause">Pause (P)</button>
+        <button id="btnReset">Reset (R)</button>
+      </div>
+    </header>
+    <div class="hud">
+      <div class="tag">Move: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or Arrows</div>
+      <div class="tag">Dash: <kbd>Space</kbd></div>
+      <div class="tag">Shoot: <kbd>J</kbd></div>
+      <div class="tag">Switch Mode: <kbd>Q</kbd> (Normal / Burst / Spread)</div>
+      <div class="tag">Ultimate: <kbd>G</kbd></div>
+      <div class="tag">Pause/Reset: <kbd>P</kbd>/<kbd>R</kbd></div>
+    </div>
+    <canvas id="game" width="960" height="540" aria-label="Echoes of Luminara prototype"></canvas>
+    <div id="testOutput" class="tag" aria-live="polite">Diagnostics: running…</div>
+    <footer>
+      Collect shards, open the gate, defeat the boss, use the portal to reach a <b>harder second room</b> (you heal and choose a <b>buff card</b>), then clear it to win.
+    </footer>
+  </div>
+
+  <div class="overlay" id="cardOverlay" role="dialog" aria-modal="true">
+    <div>
+      <h2>Choose a Blessing</h2>
+      <div class="cards" id="cardContainer"></div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const keys = Object.create(null);
+  const pressed = k => !!keys[k];
+
+  const canvas = document.getElementById('game');
+  const c = canvas.getContext('2d');
+  const overlay = document.getElementById('cardOverlay');
+  const cardContainer = document.getElementById('cardContainer');
+  const testOut = document.getElementById('testOutput');
+  const now = () => performance.now();
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+
+  const state = {
+    running:true, last:now(), dt:0, level:0,
+    ui:{message:"", messageTimer:0},
+    walls:[], enemies:[], shards:[], boss:null, bossGate:null,
+    shardsTarget:6, awaitingCard:false,
+    buffs:new Set(), regen:{t:0,rate:0},
+    ult:{ready:true, cooldown:0, COOLDOWN_MAX:0, effectT:0}
+  };
+
+  function makePlayer(){
+    return {
+      x:120,y:420,w:18,h:18, dx:0,dy:0, spd:180, friction:0.86,
+      hp:5,hpMax:5,iFrames:0,
+      dirX:1,dirY:0,
+      dash:{cool:0,time:0}, dashBase:0.8, dashMult:1,
+      shots:[], shotDmg:1, shotPierce:0,
+      shootMode:0, shootCooldown:0
+    };
+  }
+  const player = makePlayer();
+  const shootModes=["Normal","Burst","Spread"];
+
+  const levelData = [
+    {
+      shardsTarget:6,
+      walls:[ {x:0,y:0,w:960,h:40},{x:0,y:500,w:960,h:40},{x:0,y:0,w:40,h:540},{x:920,y:0,w:40,h:540},
+              {x:160,y:120,w:260,h:28},{x:520,y:120,w:220,h:28},{x:180,y:280,w:170,h:28},{x:460,y:220,w:120,h:28},{x:660,y:250,w:160,h:28},{x:260,y:420,w:140,h:28},{x:520,y:380,w:210,h:28}],
+      shardSpawns:[[120,100],[300,240],[700,110],[360,420],[780,420],[640,320],[520,200]],
+      enemies:[ {x:800,y:160},{x:240,y:420},{x:700,y:280} ], bossHp:12, bossSpeed:110
+    },
+    {
+      shardsTarget:8,
+      walls:[ {x:0,y:0,w:960,h:40},{x:0,y:500,w:960,h:40},{x:0,y:0,w:40,h:540},{x:920,y:0,w:40,h:540},
+              {x:140,y:100,w:680,h:24},{x:140,y:416,w:680,h:24}, {x:140,y:160,w:24,h:280},{x:796,y:160,w:24,h:280},
+              {x:240,y:260,w:140,h:20},{x:580,y:260,w:140,h:20}],
+      shardSpawns:[[160,140],[800,140],[160,440],[800,440],[240,220],[680,220],[240,300],[680,300],[480,180],[480,380]],
+      enemies:[ {x:820,y:180},{x:200,y:420},{x:720,y:300},{x:300,y:180},{x:480,y:260} ], bossHp:18, bossSpeed:135
+    },
+    {
+      shardsTarget:10,
+      walls:[
+        {x:0,y:0,w:960,h:40},{x:0,y:500,w:960,h:40},{x:0,y:0,w:40,h:540},{x:920,y:0,w:40,h:540},
+        {x:200,y:80,w:560,h:24},{x:200,y:440,w:560,h:24},
+        {x:200,y:140,w:24,h:300},{x:736,y:140,w:24,h:300},
+        {x:320,y:220,w:320,h:20},{x:320,y:300,w:320,h:20}
+      ],
+      shardSpawns:[
+        [160,120],[800,120],[160,460],[800,460],[260,200],[700,200],
+        [260,340],[700,340],[480,160],[480,400]
+      ],
+      enemies:[
+        {x:820,y:180},{x:200,y:420},{x:720,y:300},{x:300,y:180},
+        {x:480,y:260},{x:480,y:120},{x:480,y:420}
+      ],
+      bossHp:28, bossSpeed:155
+    }
+  ];
+
+  function makeEnemy(x,y,kind='chaser',hp=3,speed=90){ return {x,y,w:18,h:18,kind,hp,t:0,hit:0,speed}; }
+  function addShard(x,y){ state.shards.push({x,y,r:7,t:0}); }
+  const rectsOverlap = (a,b) => a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y;
+  function collideWithWalls(entity){
+    for(const w of state.walls){ if(rectsOverlap(entity,w)){
+      const dx1=(w.x+w.w)-entity.x, dx2=(entity.x+entity.w)-w.x;
+      const dy1=(w.y+w.h)-entity.y, dy2=(entity.y+entity.h)-w.y;
+      const minX=Math.min(dx1,dx2), minY=Math.min(dy1,dy2);
+      if(minX<minY){ entity.x+=(dx1<dx2?dx1:-dx2); entity.dx=0; } else { entity.y+=(dy1<dy2?dy1:-dy2); entity.dy=0; }
+    }}
+  }
+
+  function computeShotDirections(mode, dirX, dirY){
+    const base=Math.atan2(dirY, dirX||0) || 0; const dirs=[];
+    if(mode===0){ dirs.push({dx:Math.cos(base), dy:Math.sin(base), delay:0}); }
+    else if(mode===1){ const d={dx:Math.cos(base),dy:Math.sin(base)}; dirs.push({dx:d.dx,dy:d.dy,delay:0},{dx:d.dx,dy:d.dy,delay:80},{dx:d.dx,dy:d.dy,delay:160}); }
+    else if(mode===2){ for(const o of [-0.25,0,0.25]) dirs.push({dx:Math.cos(base+o),dy:Math.sin(base+o),delay:0}); }
+    return dirs;
+  }
+  function spawnShot(dx,dy,speed,life){ const len=Math.hypot(dx,dy)||1; player.shots.push({x:player.x+player.w/2,y:player.y+player.h/2,r:3,vx:(dx/len)*speed,vy:(dy/len)*speed,life,dmg:player.shotDmg,pierce:player.shotPierce}); }
+  function shoot(){ const speed=340, life=0.8; const dirs=computeShotDirections(player.shootMode,player.dirX,player.dirY); for(const d of dirs){ if(d.delay>0) setTimeout(()=>spawnShot(d.dx,d.dy,speed,life), d.delay); else spawnShot(d.dx,d.dy,speed,life); } }
+
+  function castUltimate(){
+    state.ult.ready = true;
+    state.ult.cooldown = 0;
+    state.ult.effectT = 0;
+    const dmgNormal = 6;
+    const dmgBoss = 3;
+    const radius = 99999;
+    const center = { x: player.x + player.w/2, y: player.y + player.h/2 };
+    const all = state.boss ? [...state.enemies, state.boss] : state.enemies;
+    for(const e of all){ 
+      const ex = e.x + e.w/2, ey = e.y + e.h/2; 
+      if(Math.hypot(ex - center.x, ey - center.y) <= radius){ 
+        e.hp -= (e.kind==='boss' ? dmgBoss : dmgNormal); 
+        e.hit = 0.3; 
+      } 
+    }
+    return true;
+  }
+
+  const CARD_POOL=[
+    {id:'haste', name:'Haste', desc:'Move speed +25%.', apply:()=>{ player.spd*=1.25; state.buffs.add('haste'); }},
+    {id:'power', name:'Power Shot', desc:'Shots deal +1 damage.', apply:()=>{ player.shotDmg+=1; state.buffs.add('power'); }},
+    {id:'vitality', name:'Vitality', desc:'+2 Max HP and heal to full.', apply:()=>{ player.hpMax+=2; player.hp=player.hpMax; state.buffs.add('vitality'); }},
+    {id:'pierce', name:'Piercing Rounds', desc:'Shots pierce one extra enemy.', apply:()=>{ player.shotPierce+=1; state.buffs.add('pierce'); }},
+    {id:'dash', name:'Dash Core', desc:'Dash cooldown -40%, longer i-frames.', apply:()=>{ player.dashMult*=0.6; state.buffs.add('dash'); }},
+    {id:'regen', name:'Regeneration', desc:'Heal 1 HP every 5s (out of danger).', apply:()=>{ state.regen.rate=1/5; state.buffs.add('regen'); }}
+  ];
+  function showCardChoices(){
+    const pool=[...CARD_POOL]; const picks=[]; for(let i=0;i<3;i++){ const idx=Math.floor(Math.random()*pool.length); picks.push(pool.splice(idx,1)[0]); }
+    cardContainer.innerHTML='';
+    picks.forEach(card=>{ const el=document.createElement('div'); el.className='card'; el.innerHTML=`<h3>${card.name}</h3><p>${card.desc}</p><span class="tag">Buff</span><button>Select</button>`; el.querySelector('button').onclick=()=>{ card.apply(); hideCardChoices(); }; cardContainer.appendChild(el); });
+    overlay.style.display='flex'; state.awaitingCard=true; state.running=false;
+  }
+  function hideCardChoices(){ overlay.style.display='none'; state.awaitingCard=false; state.running=true; }
+
+  function update(dt){
+    if(!state.running) return;
+
+    const ax=(pressed('d')||pressed('arrowright'))-(pressed('a')||pressed('arrowleft'));
+    const ay=(pressed('s')||pressed('arrowdown'))-(pressed('w')||pressed('arrowup'));
+    if(ax||ay){ player.dirX=ax; player.dirY=ay; }
+    const speed=player.spd*(pressed('shift')?1.15:1);
+    player.dx+=ax*speed*dt; player.dy+=ay*speed*dt; player.dx*=player.friction; player.dy*=player.friction;
+
+    player.dash.cool=Math.max(0,player.dash.cool-dt); player.dash.time=Math.max(0,player.dash.time-dt); player.iFrames=Math.max(0,player.iFrames-dt);
+    const dashCD=player.dashBase*player.dashMult;
+    if((pressed(' ')||pressed('spacebar')) && player.dash.cool<=0){ const len=Math.hypot(player.dirX,player.dirY)||1; player.dx+=(player.dirX/len)*520; player.dy+=(player.dirY/len)*520; player.dash.cool=dashCD; player.dash.time=0.12*(state.buffs.has('dash')?1.3:1); player.iFrames=0.25*(state.buffs.has('dash')?1.3:1); }
+
+    player.shootCooldown=Math.max(0,player.shootCooldown-dt);
+    if(player.shootCooldown<=0 && pressed('j')){ shoot(); player.shootCooldown=0.3; }
+
+    player.x+=player.dx*dt; player.y+=player.dy*dt; collideWithWalls(player); player.x=clamp(player.x,40,920-player.w); player.y=clamp(player.y,40,500-player.h);
+
+    for(const s of player.shots){ s.x+=s.vx*dt; s.y+=s.vy*dt; s.life-=dt; }
+    for(let i=player.shots.length-1;i>=0;i--) if(player.shots[i].life<=0) player.shots.splice(i,1);
+
+    const all=state.boss? [...state.enemies, state.boss] : state.enemies;
+    for(const e of all){ e.t+=dt; e.hit=Math.max(0,e.hit-dt); const vx=player.x-e.x, vy=player.y-e.y; const len=Math.hypot(vx,vy)||1; const sp=e.speed*(state.level?1.05:1); e.x+=(vx/len)*sp*dt; e.y+=(vy/len)*sp*dt; collideWithWalls(e);
+      if(rectsOverlap(e,player) && player.iFrames<=0){ player.hp-=1; player.iFrames=0.8; e.hit=0.2; state.ui.message='Ouch!'; state.ui.messageTimer=0.6; if(player.hp<=0) gameOver(); }
+      for(let i=player.shots.length-1;i>=0;i--){ const s=player.shots[i]; if(Math.abs(s.x-(e.x+e.w/2))<(e.w/2+4) && Math.abs(s.y-(e.y+e.h/2))<(e.h/2+4)){ e.hp-=s.dmg; e.hit=0.2; s.pierce--; if(s.pierce<0) player.shots.splice(i,1); } }
+    }
+    for(let i=state.enemies.length-1;i>=0;i--) if(state.enemies[i].hp<=0) state.enemies.splice(i,1);
+    if(state.boss && state.boss.hp<=0){ state.boss=null; state.ui.message='Boss defeated! Portal opened.'; state.ui.messageTimer=2; }
+
+    if(state.buffs.has('regen') && player.hp<player.hpMax){ state.regen.t+=dt; if(state.regen.t>=1/state.regen.rate){ player.hp=Math.min(player.hpMax,player.hp+1); state.regen.t=0; } }
+
+    for(let i=state.shards.length-1;i>=0;i--){ const s=state.shards[i]; s.t+=dt; if(Math.hypot(player.x+9-s.x, player.y+9-s.y)<16){ state.shards.splice(i,1); player.shards=(player.shards||0)+1; state.ui.message=`Shard ${player.shards}/${state.shardsTarget}`; state.ui.messageTimer=1.2; } }
+
+    if((player.shards||0)>=state.shardsTarget && !state.bossGate.open){ state.bossGate.open=true; state.boss=makeEnemy(780,260,'boss', levelData[state.level].bossHp, levelData[state.level].bossSpeed); }
+
+    if(!state.boss && player.x>880 && player.y>220 && player.y<320){ 
+      if(state.level===0){ toSecondRoom(); } 
+      else if(state.level===1){ toThirdRoom(); } 
+      else { win(); } 
+    }
+
+    state.ui.messageTimer=Math.max(0, state.ui.messageTimer - dt);
+  }
+
+  function draw(){
+    c.clearRect(0,0,canvas.width,canvas.height);
+    const g=c.createLinearGradient(0,0,0,canvas.height);
+    g.addColorStop(0,'#0a1022'); g.addColorStop(1,'#070b16'); 
+    c.fillStyle=g; c.fillRect(0,0,canvas.width,canvas.height);
+
+    for(const w of state.walls){ c.fillStyle='#142338'; c.fillRect(w.x,w.y,w.w,w.h); c.fillStyle='#1b2d4b'; c.fillRect(w.x+2,w.y+2,w.w-4,w.h-4); }
+
+    if(!state.bossGate.open){ c.fillStyle='#3b1f34'; c.fillRect(state.bossGate.x,state.bossGate.y,state.bossGate.w,state.bossGate.h); c.fillStyle='#ff77e1'; c.globalAlpha=0.75; c.fillRect(state.bossGate.x+4,state.bossGate.y+4,state.bossGate.w-8,state.bossGate.h-8); c.globalAlpha=1; }
+    else if(!state.boss){ c.save(); const t=performance.now()/1000; c.translate(900,270); c.fillStyle='#4ad'; c.beginPath(); c.arc(0,0,24+Math.sin(t*4)*2,0,Math.PI*2); c.fill(); c.strokeStyle='#bdf'; c.lineWidth=3; c.beginPath(); c.arc(0,0,30,0,Math.PI*2); c.stroke(); c.restore(); }
+
+    for(const s of state.shards){ const r=s.r+Math.sin(s.t*6)*1.2; const rg=c.createRadialGradient(s.x,s.y,0,s.x,s.y,r+6); rg.addColorStop(0,'#b1ff8a'); rg.addColorStop(1,'#b1ff8a00'); c.fillStyle=rg; c.beginPath(); c.arc(s.x,s.y,r+6,0,Math.PI*2); c.fill(); c.fillStyle='#b1ff8a'; c.beginPath(); c.arc(s.x,s.y,r,0,Math.PI*2); c.fill(); }
+
+    const all=state.boss?[...state.enemies,state.boss]:state.enemies;
+    for(const e of all){ c.save(); if(e.kind==='boss'){ c.shadowColor='#ff7bd1'; c.shadowBlur=18; } c.fillStyle=e.kind==='boss'?'#ff4fb2':'#ff6b6b'; if(e.hit>0) c.globalAlpha=0.6; c.fillRect(e.x,e.y,e.w,e.h); c.restore(); c.fillStyle='#ffadc9'; const maxPips=Math.min(12,e.kind==='boss'?12:3); for(let i=0;i<Math.min(maxPips,e.hp);i++) c.fillRect(e.x+i*3,e.y-4,2,2); }
+
+    c.save(); if(player.iFrames>0){ c.globalAlpha=0.6+Math.sin(performance.now()*0.02)*0.3; } c.fillStyle='#8ee1ff'; c.fillRect(player.x,player.y,player.w,player.h); c.restore();
+
+    for(const s of player.shots){ c.fillStyle='#c5f1ff'; c.beginPath(); c.arc(s.x,s.y, s.r, 0, Math.PI*2); c.fill(); }
+
+    drawHUD();
+  }
+
+  function drawHUD(){
+    const x0=52,y0=16; for(let i=0;i<player.hpMax;i++){ const x=x0+i*18; c.fillStyle='#2a3452'; c.fillRect(x-2,y0-2,16,12); c.fillStyle=i<player.hp?'#ff8fa3':'#3a445f'; c.beginPath(); const px=x,py=y0; c.moveTo(px+4,py+10); c.bezierCurveTo(px-4,py+6,px-1,py,px+4,py+3); c.bezierCurveTo(px+9,py,px+12,py+6,px+4,py+10); c.fill(); }
+
+    c.fillStyle='#b1ff8a'; c.fillRect(16,14,10,10); c.fillStyle='#d7fde0'; c.font='bold 14px system-ui'; c.fillText(`x ${player.shards||0}/${state.shardsTarget}`,30,24);
+
+    c.fillStyle='#d6e2ff'; c.font='bold 14px system-ui'; c.fillText('Mode: '+shootModes[player.shootMode], 140, 24);
+
+    c.fillStyle='#9aa4b2'; c.fillText('ULT', 260, 24);
+    const meterX=288, meterY=14, meterW=100, meterH=12; c.strokeStyle='#2a3452'; c.strokeRect(meterX-1, meterY-1, meterW+2, meterH+2);
+    c.fillStyle='#8ee1ff'; c.fillRect(meterX, meterY, meterW, meterH);
+
+    if(state.ui.messageTimer>0){ c.save(); c.globalAlpha=clamp(state.ui.messageTimer,0,1); c.fillStyle='#d6e2ff'; c.font='bold 18px system-ui'; c.fillText(state.ui.message, canvas.width/2-120, 30); c.restore(); }
+
+    if(!state.running && !state.awaitingCard){ c.save(); c.fillStyle='#0b1120bb'; c.fillRect(0,0,canvas.width,canvas.height); c.fillStyle='#e5e7eb'; c.font='700 32px system-ui'; c.fillText('Paused', canvas.width/2-60, canvas.height/2-10); c.fillStyle='#9aa4b2'; c.font='16px system-ui'; c.fillText('Press P to resume', canvas.width/2-70, canvas.height/2+18); c.restore(); }
+  }
+
+  function setupLevel(level){
+    const data=levelData[level]; state.level=level; state.shardsTarget=data.shardsTarget; state.walls=data.walls.map(w=>({...w}));
+    state.enemies.splice(0,state.enemies.length); data.enemies.forEach(e=>state.enemies.push(makeEnemy(e.x,e.y,'chaser',3, level?105:90)));
+    state.shards.splice(0,state.shards.length); data.shardSpawns.forEach(([x,y])=>addShard(x,y));
+    state.boss=null; state.bossGate={x:880,y:220,w:20,h:100,open:false}; player.shards=0; player.x=120; player.y=420; player.dx=player.dy=0;
+    state.ult.ready = true; state.ult.cooldown = 0;
+  }
+  function toSecondRoom(){ setupLevel(1); player.hp=player.hpMax; state.ui.message='You feel renewed… choose a blessing!'; state.ui.messageTimer=2.5; showCardChoices(); }
+  function toThirdRoom(){ setupLevel(2); player.hp=player.hpMax; state.ui.message='Final challenge awaits… choose wisely.'; state.ui.messageTimer=2.5; showCardChoices(); }
+  function gameOver(){ state.ui.message='You fell to the Void… Press R to retry'; state.ui.messageTimer=4; state.running=false; }
+  function win(){ state.ui.message='You conquered the Rift! Press R to play again'; state.ui.messageTimer=5; state.running=false; }
+  function reset(){ const keepBuffs=false; if(!keepBuffs){ state.buffs.clear(); player.spd=180; player.hpMax=5; player.shotDmg=1; player.shotPierce=0; state.regen={t:0,rate:0}; player.dashMult=1; }
+    Object.assign(player, {...player, hp:player.hpMax, iFrames:0}); setupLevel(0); state.ui.message=''; state.ui.messageTimer=0; state.running=true; overlay.style.display='none'; state.awaitingCard=false; state.ult.ready=true; state.ult.cooldown=0; }
+
+  function loop(){ const t=now(); state.dt=Math.min(0.033,(t-state.last)/1000); state.last=t; update(state.dt); draw(); requestAnimationFrame(loop); }
+  addEventListener('keydown', e=>{ const k=e.key.toLowerCase(); keys[k]=true; if(k==='q'){ player.shootMode=(player.shootMode+1)%shootModes.length; } if(k==='p' && !state.awaitingCard){ state.running=!state.running; } if(k==='r'){ reset(); } if(k==='g'){ castUltimate(); } });
+  addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+
+  reset();
+  loop();
+
+  document.getElementById('btnPause').onclick=()=>{ if(!state.awaitingCard) state.running=!state.running; };
+  document.getElementById('btnReset').onclick=()=>reset();
+})();
+</script>
+</body>
+</html>
